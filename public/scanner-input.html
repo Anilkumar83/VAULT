@@ -27,81 +27,88 @@
   </footer>
 
   <script>
-    const ws = new WebSocket('ws://localhost:3000');
+    function connectWebSocket() {
+      const ws = new WebSocket('wss://vault-4n5e.onrender.com');
 
-    ws.onopen = () => {
-      console.log('Connected to WebSocket server');
-    };
+      ws.onopen = () => {
+        console.log('Connected to WebSocket server');
+      };
 
-    ws.onerror = (error) => {
-      console.error('WebSocket error on scanner:', error);
-      document.getElementById('scan-result').textContent = 'WebSocket connection failed. Please refresh the page.';
-    };
+      ws.onerror = (error) => {
+        console.error('WebSocket error on scanner:', error);
+        document.getElementById('scan-result').textContent = 'WebSocket connection failed. Attempting to reconnect...';
+        setTimeout(connectWebSocket, 5000);
+      };
 
-    ws.onclose = () => {
-      console.log('WebSocket connection closed');
-      document.getElementById('scan-result').textContent = 'WebSocket connection closed. Please refresh the page.';
-    };
+      ws.onclose = () => {
+        console.log('WebSocket connection closed');
+        document.getElementById('scan-result').textContent = 'WebSocket connection closed. Attempting to reconnect...';
+        setTimeout(connectWebSocket, 5000);
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log('Received message from server:', data);
-        if (data.type === 'error') {
-          document.getElementById('scan-result').textContent = data.message;
-        } else if (data.type === 'manualInput') {
-          document.getElementById('scan-result').textContent = data.message;
-          alert(`Please go to the product page and enter details for barcode ${data.barcode} manually.`);
-          window.location.href = '/index.html';
-        } else if (data.type === 'update') {
-          console.log('Received product update:', data.products);
-          window.location.href = '/index.html';
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Received message from server:', data);
+          if (data.type === 'error') {
+            document.getElementById('scan-result').textContent = data.message;
+          } else if (data.type === 'manualInput') {
+            document.getElementById('scan-result').textContent = data.message;
+            alert(`Please go to the product page and enter details for barcode ${data.barcode} manually.`);
+            window.location.href = '/index.html';
+          } else if (data.type === 'update') {
+            console.log('Received product update:', data.products);
+            window.location.href = '/index.html';
+          }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
         }
-      } catch (error) {
-        console.error('Error parsing WebSocket message:', error);
-      }
-    };
+      };
 
-    const barcodeInput = document.getElementById('barcode-input');
-    let inputBuffer = '';
+      const barcodeInput = document.getElementById('barcode-input');
+      let inputBuffer = '';
 
-    barcodeInput.addEventListener('input', (e) => {
-      inputBuffer += e.data || '';
-    });
+      barcodeInput.addEventListener('input', (e) => {
+        inputBuffer += e.data || '';
+      });
 
-    barcodeInput.addEventListener('change', () => {
-      const input = inputBuffer.trim();
-      console.log('Scanned input:', input);
+      barcodeInput.addEventListener('change', () => {
+        const input = inputBuffer.trim();
+        console.log('Scanned input:', input);
 
-      if (input) {
-        let resultText;
-        if ((input.length === 12 || input.length === 13) && !isNaN(input)) {
-          resultText = `Scanned Barcode: ${input}`;
-        } else {
-          try {
-            const productData = JSON.parse(input);
-            resultText = `Scanned QR Code: Product ${productData.name} (ID: ${productData.id})`;
-          } catch (error) {
-            resultText = 'Invalid scan data. Please scan a valid barcode or QR code.';
-            console.error('Error parsing QR code:', error);
+        if (input) {
+          let resultText;
+          if ((input.length === 12 || input.length === 13) && !isNaN(input)) {
+            resultText = `Scanned Barcode: ${input}`;
+          } else {
+            try {
+              const productData = JSON.parse(input);
+              resultText = `Scanned QR Code: Product ${productData.name} (ID: ${productData.id})`;
+            } catch (error) {
+              resultText = 'Invalid scan data. Please scan a valid barcode or QR code.';
+              console.error('Error parsing QR code:', error);
+            }
+          }
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(input);
+            console.log('Input sent to server:', input);
+            document.getElementById('scan-result').textContent = resultText;
+          } else {
+            document.getElementById('scan-result').textContent = 'WebSocket not connected. Cannot process scan.';
           }
         }
 
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(input);
-          console.log('Input sent to server:', input);
-          document.getElementById('scan-result').textContent = resultText;
-        } else {
-          document.getElementById('scan-result').textContent = 'WebSocket not connected. Cannot process scan.';
-        }
-      }
+        inputBuffer = '';
+        barcodeInput.value = '';
+        barcodeInput.focus();
+      });
 
-      inputBuffer = '';
-      barcodeInput.value = '';
       barcodeInput.focus();
-    });
+    }
 
-    barcodeInput.focus();
+    // Initial WebSocket connection
+    connectWebSocket();
   </script>
 </body>
 </html>
