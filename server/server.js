@@ -14,7 +14,7 @@ const wss = new WebSocket.Server({ server });
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Allow CORS for WebSocket (optional, for local testing)
+// Allow CORS for WebSocket
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   next();
@@ -47,6 +47,7 @@ function isExpiringSoon(expiryDate) {
 async function fetchProductDetails(barcode) {
   try {
     const response = await axios.get(`https://world.openfoodfacts.net/api/v2/product/${barcode}.json`);
+    console.log(`Open Food Facts response for barcode ${barcode}:`, response.data);
     const product = response.data.product;
 
     if (!product || response.data.status === 0) {
@@ -80,8 +81,8 @@ async function saveProductToFirebase(barcode, productData) {
     await database.ref(`/products/${barcode}`).set(productData);
     console.log(`Product ${productData.name} saved to Firebase under barcode ${barcode}`);
   } catch (error) {
-    console.error('Error saving product to Firebase:', error);
-    throw error;
+    console.error('Error saving product to Firebase:', error.message);
+    throw new Error(`Failed to save product to Firebase: ${error.message}`);
   }
 }
 
@@ -91,8 +92,8 @@ async function deleteProductFromFirebase(barcode) {
     await database.ref(`/products/${barcode}`).remove();
     console.log(`Product with barcode ${barcode} removed from Firebase`);
   } catch (error) {
-    console.error('Error deleting product from Firebase:', error);
-    throw error;
+    console.error('Error deleting product from Firebase:', error.message);
+    throw new Error(`Failed to delete product from Firebase: ${error.message}`);
   }
 }
 
@@ -101,6 +102,7 @@ wss.on('connection', (ws) => {
   console.log('Client connected');
 
   ws.send(JSON.stringify({ type: 'initial', products }));
+  console.log('Initial products sent to client:', products);
 
   ws.on('message', async (message) => {
     console.log('Received message:', message.toString());
@@ -109,7 +111,6 @@ wss.on('connection', (ws) => {
       let productData;
 
       if (data.type === 'delete') {
-        // Handle delete request
         const productId = data.productId;
         const productIndex = products.findIndex(p => p.id === productId);
         if (productIndex !== -1) {
@@ -117,20 +118,17 @@ wss.on('connection', (ws) => {
           products.splice(productIndex, 1);
           console.log(`Product with ID ${productId} deleted`);
 
-          // Remove from Firebase if barcode exists
           if (barcode) {
             await deleteProductFromFirebase(barcode);
           }
 
-          // Broadcast updated products
           wss.clients.forEach((client) => {
             if (client.readyState === WebSocket.OPEN) {
               client.send(JSON.stringify({ type: 'update', products }));
-              console.log('Updated products sent to client');
+              console.log('Updated products sent to client after delete:', products);
             }
           });
 
-          // Recheck expiring products
           const expiringProducts = products.filter(product => isExpiringSoon(product.expiryDate));
           if (expiringProducts.length > 0) {
             sendExpiringProductsEmail(expiringProducts);
@@ -142,8 +140,15 @@ wss.on('connection', (ws) => {
       const input = typeof data === 'string' ? data : JSON.stringify(data);
       if ((input.length === 12 || input.length === 13) && !isNaN(input)) {
         console.log('Processing as barcode');
-        const snapshot = await database.ref(`/products/${input}`).once('value');
-        productData = snapshot.val();
+        try {
+          const snapshot = await database.ref(`/products/${input}`).once('value');
+          productData = snapshot.val();
+          console.log(`Firebase lookup for barcode ${input}:`, productData);
+        } catch (error) {
+          console.error('Firebase lookup failed:', error.message);
+          ws.send(JSON.stringify({ type: 'error', message: `Database error: ${error.message}` }));
+          return;
+        }
 
         if (!productData) {
           console.log(`Product with barcode ${input} not found in database. Fetching from Open Food Facts...`);
@@ -151,6 +156,7 @@ wss.on('connection', (ws) => {
             productData = await fetchProductDetails(input);
             await saveProductToFirebase(input, productData);
           } catch (error) {
+            console.log(`Prompting manual input for barcode ${input}`);
             ws.send(JSON.stringify({
               type: 'manualInput',
               message: `No data found for barcode ${input}. Please enter details manually on the product page.`,
@@ -169,6 +175,7 @@ wss.on('connection', (ws) => {
             return;
           }
           if (productData.barcode) {
+            console.log(`Saving manual input for barcode ${productData.barcode}:`, productData);
             await saveProductToFirebase(productData.barcode, productData);
             delete productData.barcode;
           }
@@ -181,8 +188,8 @@ wss.on('connection', (ws) => {
 
       processProduct(productData, ws);
     } catch (error) {
-      console.error('Error processing message:', error);
-      ws.send(JSON.stringify({ type: 'error', message: 'Server error processing scan' }));
+      console.error('Error processing message:', error.message);
+      ws.send(JSON.stringify({ type: 'error', message: `Server error processing scan: ${error.message}` }));
     }
   });
 
@@ -197,32 +204,46 @@ wss.on('connection', (ws) => {
 
 // Function to process product (add or remove)
 function processProduct(productData, ws) {
-  const existingProductIndex = products.findIndex(p => p.id === productData.id);
-  if (existingProductIndex !== -1) {
-    products.splice(existingProductIndex, 1);
-    console.log(`Product with ID ${productData.id} removed (sold out)`);
-  } else {
-    products.push(productData);
-    console.log(`Product with ID ${productData.id} added`);
-  }
-
-  console.log('Broadcasting updated products:', products);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: 'update', products }));
-      console.log('Message sent to client');
+  try {
+    const existingProductIndex = products.findIndex(p => p.id === productData.id);
+    if (existingProductIndex !== -1) {
+      products.splice(existingProductIndex, 1);
+      console.log(`Product with ID ${productData.id} removed (sold out)`);
+    } else {
+      products.push(productData);
+      console.log(`Product with ID ${productData.id} added to products array`);
     }
-  });
 
-  const expiringProducts = products.filter(product => isExpiringSoon(product.expiryDate));
-  console.log('Expiring products:', expiringProducts);
-  if (expiringProducts.length > 0) {
-    sendExpiringProductsEmail(expiringProducts);
+    console.log('Broadcasting updated products:', products);
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: 'update', products }));
+        console.log('Message sent to client:', products);
+      }
+    });
+
+    const expiringProducts = products.filter(product => isExpiringSoon(product.expiryDate));
+    console.log('Expiring products:', expiringProducts);
+    if (expiringProducts.length > 0) {
+      sendExpiringProductsEmail(expiringProducts);
+    }
+  } catch (error) {
+    console.error('Error in processProduct:', error.message);
+    ws.send(JSON.stringify({ type: 'error', message: `Error processing product: ${error.message}` }));
   }
 }
 
-// Start the server on localhost port 3000
-const PORT = 3000;
+// Global error handling to prevent server crashes
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Start the server on the port provided by Render
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
